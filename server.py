@@ -1,14 +1,20 @@
 """MCP server that identifies animal species from a DNA barcode (COI gene)
-sequence by locally aligning it against a curated reference database."""
+sequence by locally aligning it against a curated reference database.
 
+Speaks JSON-RPC 2.0 directly over stdio — no MCP SDK. Each message is one
+line of JSON terminated by '\\n', per the MCP stdio transport spec.
+"""
+
+import json
 import os
-
-from mcp.server.fastmcp import FastMCP
+import sys
 
 from alignment import clean_sequence, parse_fasta, smith_waterman
 
 REFERENCE_PATH = os.path.join(os.path.dirname(os.path.abspath(__file__)), "reference_sequences.fasta")
 REFERENCE_RECORDS = parse_fasta(REFERENCE_PATH)
+
+PROTOCOL_VERSION = "2025-11-25"
 
 # Congeneric species (e.g. lion vs. tiger) can score >99% COI identity on a
 # short barcode fragment, well above the usual ~97% species cutoff cited in
@@ -16,14 +22,6 @@ REFERENCE_RECORDS = parse_fasta(REFERENCE_PATH)
 # avoid misclassifying a close relative as the same species.
 SAME_SPECIES_THRESHOLD = 99.0
 RELATED_SPECIES_THRESHOLD = 90.0
-
-mcp = FastMCP(
-    name="dna-species-id",
-    instructions=(
-        "Identifies animal species from a DNA barcode (COI gene) sequence by "
-        "local sequence alignment (Smith-Waterman) against a reference database."
-    ),
-)
 
 
 def _interpret(identity_percent: float) -> str:
@@ -34,26 +32,16 @@ def _interpret(identity_percent: float) -> str:
     return "different species"
 
 
-@mcp.tool()
-def list_reference_species() -> list[dict]:
-    """Lists the species available in the reference COI barcode database."""
+def _list_reference_species(_arguments: dict) -> list[dict]:
     return [
         {"species": header.split("|")[0], "accession": header.split("|")[1]}
         for header, _ in REFERENCE_RECORDS
     ]
 
 
-@mcp.tool()
-def identify_sequence(sequence: str, top_n: int = 3) -> dict:
-    """Identifies the most likely species for a DNA barcode sequence by
-    aligning it against every reference sequence and ranking by percent
-    identity of the best local alignment.
-
-    Args:
-        sequence: raw DNA sequence (FASTA or plain), IUPAC bases A/C/G/T/N.
-        top_n: how many top matches to return (default 3).
-    """
-    query = clean_sequence(sequence)
+def _identify_sequence(arguments: dict) -> dict:
+    query = clean_sequence(arguments["sequence"])
+    top_n = arguments.get("top_n", 3)
 
     results = []
     for header, reference_seq in REFERENCE_RECORDS:
@@ -81,18 +69,9 @@ def identify_sequence(sequence: str, top_n: int = 3) -> dict:
     }
 
 
-@mcp.tool()
-def compare_sequences(sequence_a: str, sequence_b: str) -> dict:
-    """Compares two arbitrary DNA barcode sequences directly against each
-    other and reports their percent identity and a same/related/different
-    species interpretation.
-
-    Args:
-        sequence_a: first raw DNA sequence.
-        sequence_b: second raw DNA sequence.
-    """
-    clean_a = clean_sequence(sequence_a)
-    clean_b = clean_sequence(sequence_b)
+def _compare_sequences(arguments: dict) -> dict:
+    clean_a = clean_sequence(arguments["sequence_a"])
+    clean_b = clean_sequence(arguments["sequence_b"])
     alignment = smith_waterman(clean_a, clean_b)
 
     return {
@@ -105,5 +84,114 @@ def compare_sequences(sequence_a: str, sequence_b: str) -> dict:
     }
 
 
+TOOLS = {
+    "list_reference_species": {
+        "description": "Lists the species available in the reference COI barcode database.",
+        "inputSchema": {"type": "object", "properties": {}},
+        "handler": _list_reference_species,
+    },
+    "identify_sequence": {
+        "description": (
+            "Identifies the most likely species for a DNA barcode sequence by aligning "
+            "it against every reference sequence and ranking by percent identity of the "
+            "best local alignment."
+        ),
+        "inputSchema": {
+            "type": "object",
+            "properties": {
+                "sequence": {
+                    "type": "string",
+                    "description": "raw DNA sequence (FASTA or plain), IUPAC bases A/C/G/T/N.",
+                },
+                "top_n": {
+                    "type": "integer",
+                    "description": "how many top matches to return (default 3).",
+                },
+            },
+            "required": ["sequence"],
+        },
+        "handler": _identify_sequence,
+    },
+    "compare_sequences": {
+        "description": (
+            "Compares two arbitrary DNA barcode sequences directly against each other "
+            "and reports their percent identity."
+        ),
+        "inputSchema": {
+            "type": "object",
+            "properties": {
+                "sequence_a": {"type": "string", "description": "first raw DNA sequence."},
+                "sequence_b": {"type": "string", "description": "second raw DNA sequence."},
+            },
+            "required": ["sequence_a", "sequence_b"],
+        },
+        "handler": _compare_sequences,
+    },
+}
+
+
+def _write(message: dict) -> None:
+    sys.stdout.write(json.dumps(message) + "\n")
+    sys.stdout.flush()
+
+
+def _handle_request(method: str, params: dict):
+    if method == "initialize":
+        return {
+            "protocolVersion": PROTOCOL_VERSION,
+            "capabilities": {"tools": {"listChanged": False}},
+            "serverInfo": {"name": "dna-species-id", "version": "1.0.0"},
+        }
+    if method == "tools/list":
+        return {
+            "tools": [
+                {
+                    "name": name,
+                    "description": tool["description"],
+                    "inputSchema": tool["inputSchema"],
+                }
+                for name, tool in TOOLS.items()
+            ]
+        }
+    if method == "tools/call":
+        name = params["name"]
+        arguments = params.get("arguments") or {}
+        tool = TOOLS.get(name)
+        if tool is None:
+            raise ValueError(f"Unknown tool: {name}")
+        try:
+            result = tool["handler"](arguments)
+            return {"content": [{"type": "text", "text": json.dumps(result, indent=2)}]}
+        except Exception as exc:  # noqa: BLE001 — surfaced to the client as a tool error
+            return {"content": [{"type": "text", "text": str(exc)}], "isError": True}
+    raise ValueError(f"Unknown method: {method}")
+
+
+def main() -> None:
+    for line in sys.stdin:
+        line = line.strip()
+        if not line:
+            continue
+        try:
+            message = json.loads(line)
+        except json.JSONDecodeError:
+            continue
+
+        method = message.get("method")
+        msg_id = message.get("id")
+        params = message.get("params") or {}
+
+        if method == "notifications/initialized":
+            continue  # notifications never get a response
+
+        try:
+            result = _handle_request(method, params)
+            if msg_id is not None:
+                _write({"jsonrpc": "2.0", "id": msg_id, "result": result})
+        except Exception as exc:  # noqa: BLE001 — reported back as a JSON-RPC error
+            if msg_id is not None:
+                _write({"jsonrpc": "2.0", "id": msg_id, "error": {"code": -32603, "message": str(exc)}})
+
+
 if __name__ == "__main__":
-    mcp.run(transport="stdio")
+    main()

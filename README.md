@@ -6,6 +6,10 @@ by locally aligning the query sequence against a curated reference database. Bui
 Redes (Universidad del Valle de Guatemala) as a custom MCP server for the
 [mcp-zoo-chatbot](https://github.com/Qu3zada22/mcp-zoo-chatbot) project.
 
+> **No MCP SDK.** `server.py` speaks JSON-RPC 2.0 directly over stdio — reading and writing
+> newline-delimited JSON messages by hand (`initialize`, `notifications/initialized`, `tools/list`,
+> `tools/call`) — using only the Python standard library. No `mcp` package, no framework.
+
 ## How it works
 
 1. A DNA sequence (raw or FASTA) is cleaned and validated (IUPAC bases A/C/G/T/N only).
@@ -84,34 +88,43 @@ cd mcp-server-dna-species-id
 
 python3 -m venv .venv
 source .venv/bin/activate   # on Windows: .venv\Scripts\activate
-pip install -r requirements.txt
+pip install -r requirements.txt   # currently empty — standard library only
 ```
 
 ## Verify it works (before wiring it into your own chatbot)
 
 This checks the server itself is fine, independent of whatever host/chatbot you plan to connect it
-to. Save this as `test_server.py` in this same folder and run `python test_server.py` (with the
-venv activated):
+to. It speaks raw JSON-RPC over the server's stdin/stdout — no MCP SDK needed to test it either.
+Save this as `test_server.py` in this same folder and run `python test_server.py`:
 
 ```python
-import asyncio
-from mcp import ClientSession, StdioServerParameters
-from mcp.client.stdio import stdio_client
+import json
+import subprocess
 
-async def main():
-    params = StdioServerParameters(command="python3", args=["server.py"])
-    async with stdio_client(params) as (read, write):
-        async with ClientSession(read, write) as session:
-            await session.initialize()
-            tools = await session.list_tools()
-            print("Tools:", [t.name for t in tools.tools])
+proc = subprocess.Popen(
+    ["python3", "server.py"],
+    stdin=subprocess.PIPE, stdout=subprocess.PIPE, text=True,
+)
 
-            result = await session.call_tool("list_reference_species", {})
-            # FastMCP returns one text content block per list item, so join
-            # them all rather than reading just content[0].
-            print("\n".join(block.text for block in result.content))
+def send(message):
+    proc.stdin.write(json.dumps(message) + "\n")
+    proc.stdin.flush()
+    return json.loads(proc.stdout.readline())
 
-asyncio.run(main())
+send({"jsonrpc": "2.0", "id": 0, "method": "initialize", "params": {
+    "protocolVersion": "2025-11-25", "capabilities": {}, "clientInfo": {"name": "test", "version": "1.0"},
+}})
+proc.stdin.write(json.dumps({"jsonrpc": "2.0", "method": "notifications/initialized"}) + "\n")
+proc.stdin.flush()
+
+tools = send({"jsonrpc": "2.0", "id": 1, "method": "tools/list"})
+print("Tools:", [t["name"] for t in tools["result"]["tools"]])
+
+result = send({"jsonrpc": "2.0", "id": 2, "method": "tools/call",
+               "params": {"name": "list_reference_species", "arguments": {}}})
+print(result["result"]["content"][0]["text"])
+
+proc.terminate()
 ```
 
 Expected output: `Tools: ['list_reference_species', 'identify_sequence', 'compare_sequences']`
@@ -134,8 +147,9 @@ Add it to the host's MCP server configuration, pointing `command`/`args` at this
 }
 ```
 
-`python3` here must be an interpreter that has `mcp` installed — if you set up the venv above,
-point `command` at `/absolute/path/to/mcp-server-dna-species-id/.venv/bin/python3` instead (or the
+`python3` here just needs to be Python 3.11+ — the server has no third-party dependencies at all,
+so any interpreter works, venv or not. If you did create the venv above, point `command` at
+`/absolute/path/to/mcp-server-dna-species-id/.venv/bin/python3` instead (or the
 `Scripts\python.exe` equivalent on Windows) to avoid depending on which Python happens to be on
 `PATH`.
 
@@ -154,9 +168,6 @@ Given a query sequence identical to the reference lion sequence:
 
 ## Troubleshooting
 
-- **`ModuleNotFoundError: No module named 'mcp'`** — the venv isn't activated, or your host is
-  launching a different Python than the one you ran `pip install -r requirements.txt` with. Point
-  `command` at the venv's Python directly (see above).
 - **Host can't find the server / times out on startup** — double-check the path in `args` is
   absolute, not relative.
 - **Unexpected low identity scores** — the aligner expects raw DNA bases (A/C/G/T/N); strip any
@@ -167,7 +178,7 @@ Given a query sequence identical to the reference lion sequence:
 
 ```
 mcp-server-dna-species-id/
-├── server.py                  # MCP tools (FastMCP)
+├── server.py                  # MCP tools, hand-rolled JSON-RPC (no SDK)
 ├── alignment.py                # Smith-Waterman implementation (from scratch)
 ├── reference_sequences.fasta   # 8 real COI sequences from NCBI GenBank
 ├── requirements.txt

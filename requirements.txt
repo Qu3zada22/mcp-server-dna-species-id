@@ -1,1 +1,2 @@
-mcp>=2.2
+# No dependencies: server.py speaks JSON-RPC 2.0 directly over stdio
+# (standard library only) — no MCP SDK.
