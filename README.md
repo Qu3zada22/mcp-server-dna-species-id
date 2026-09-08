@@ -73,29 +73,58 @@ Lists the species available in the reference database, e.g.
 ## Requirements
 
 - Python 3.11+
+- No API key, account, or internet access needed at runtime — everything (alignment algorithm,
+  reference sequences) is self-contained in this repo.
 
 ## Setup
 
 ```bash
+git clone https://github.com/Qu3zada22/mcp-server-dna-species-id.git
+cd mcp-server-dna-species-id
+
 python3 -m venv .venv
-source .venv/bin/activate
+source .venv/bin/activate   # on Windows: .venv\Scripts\activate
 pip install -r requirements.txt
 ```
 
-## Usage
+## Verify it works (before wiring it into your own chatbot)
 
-### Standalone (for testing)
+This checks the server itself is fine, independent of whatever host/chatbot you plan to connect it
+to. Save this as `test_server.py` in this same folder and run `python test_server.py` (with the
+venv activated):
 
-```bash
-python server.py
+```python
+import asyncio
+from mcp import ClientSession, StdioServerParameters
+from mcp.client.stdio import stdio_client
+
+async def main():
+    params = StdioServerParameters(command="python3", args=["server.py"])
+    async with stdio_client(params) as (read, write):
+        async with ClientSession(read, write) as session:
+            await session.initialize()
+            tools = await session.list_tools()
+            print("Tools:", [t.name for t in tools.tools])
+
+            result = await session.call_tool("list_reference_species", {})
+            # FastMCP returns one text content block per list item, so join
+            # them all rather than reading just content[0].
+            print("\n".join(block.text for block in result.content))
+
+asyncio.run(main())
 ```
 
-This starts the server on stdio, waiting for an MCP client to connect (it prints nothing on its
-own — it's meant to be driven by a client, not run interactively).
+Expected output: `Tools: ['list_reference_species', 'identify_sequence', 'compare_sequences']`
+followed by all 8 reference species (lion, tiger, elephant, giraffe, chimpanzee, panda, ostrich,
+crocodile). If you see that, the server works — any further issues are in how your host is
+configured to launch it, not in this repo.
 
-### From an MCP host (e.g. Claude Desktop, or a custom chatbot)
+## Usage
 
-Add it to the host's MCP server configuration, pointing `command`/`args` at this server, e.g.:
+### From an MCP host (e.g. Claude Desktop, or your own chatbot)
+
+Add it to the host's MCP server configuration, pointing `command`/`args` at this server using the
+**absolute path** to `server.py` (so it works regardless of the host's working directory), e.g.:
 
 ```json
 {
@@ -104,6 +133,11 @@ Add it to the host's MCP server configuration, pointing `command`/`args` at this
   "args": ["/absolute/path/to/mcp-server-dna-species-id/server.py"]
 }
 ```
+
+`python3` here must be an interpreter that has `mcp` installed — if you set up the venv above,
+point `command` at `/absolute/path/to/mcp-server-dna-species-id/.venv/bin/python3` instead (or the
+`Scripts\python.exe` equivalent on Windows) to avoid depending on which Python happens to be on
+`PATH`.
 
 ### Example
 
@@ -117,6 +151,17 @@ Given a query sequence identical to the reference lion sequence:
   ...
 }
 ```
+
+## Troubleshooting
+
+- **`ModuleNotFoundError: No module named 'mcp'`** — the venv isn't activated, or your host is
+  launching a different Python than the one you ran `pip install -r requirements.txt` with. Point
+  `command` at the venv's Python directly (see above).
+- **Host can't find the server / times out on startup** — double-check the path in `args` is
+  absolute, not relative.
+- **Unexpected low identity scores** — the aligner expects raw DNA bases (A/C/G/T/N); strip any
+  FASTA header line and whitespace before sending the sequence (or pass the whole FASTA text as-is —
+  `identify_sequence` strips `>` header lines automatically).
 
 ## Project structure
 
