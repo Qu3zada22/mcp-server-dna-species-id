@@ -82,6 +82,8 @@ Lists the species available in the reference database, e.g.
 
 ## Setup
 
+### Option A: plain Python (no isolation needed — zero dependencies)
+
 ```bash
 git clone https://github.com/Qu3zada22/mcp-server-dna-species-id.git
 cd mcp-server-dna-species-id
@@ -90,6 +92,19 @@ python3 -m venv .venv
 source .venv/bin/activate   # on Windows: .venv\Scripts\activate
 pip install -r requirements.txt   # currently empty — standard library only
 ```
+
+### Option B: Docker (runs anywhere, no Python setup at all)
+
+```bash
+git clone https://github.com/Qu3zada22/mcp-server-dna-species-id.git
+cd mcp-server-dna-species-id
+docker build -t mcp-server-dna-species-id .
+```
+
+Run it with `docker run -i --rm mcp-server-dna-species-id` — the `-i` flag keeps stdin open
+(required: MCP speaks JSON-RPC over stdin/stdout) and `--rm` cleans up the container on exit. No
+`-t` (no pseudo-TTY), since a real MCP host pipes raw JSON-RPC lines, not an interactive terminal
+session.
 
 ## Verify it works (before wiring it into your own chatbot)
 
@@ -153,6 +168,17 @@ so any interpreter works, venv or not. If you did create the venv above, point `
 `Scripts\python.exe` equivalent on Windows) to avoid depending on which Python happens to be on
 `PATH`.
 
+If you built the Docker image instead (Option B above), point the host at `docker` directly — no
+Python install needed on the host machine at all:
+
+```json
+{
+  "name": "dna-species-id",
+  "command": "docker",
+  "args": ["run", "-i", "--rm", "mcp-server-dna-species-id"]
+}
+```
+
 ### Example
 
 Given a query sequence identical to the reference lion sequence:
@@ -182,5 +208,6 @@ mcp-server-dna-species-id/
 ├── alignment.py                # Smith-Waterman implementation (from scratch)
 ├── reference_sequences.fasta   # 8 real COI sequences from NCBI GenBank
 ├── requirements.txt
+├── Dockerfile                  # containerized, zero-dependency build
 └── README.md
 ```
